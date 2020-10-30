@@ -1,0 +1,289 @@
+#!/usr/bin/env python
+# coding: utf-8
+
+# (note)Much of the code in the beginning was referenced from Professor Chow's example on creating a function for getting covid data by passing a state abbreviation. 
+
+# We begin by importing the core dependecies and loading in the confirmed covid cases data from covid_confirmed_usafacts.csv. The csv was downloaded from the usafacts website on 10/20/20, resulting in the last day recorded being 10/19/20.
+
+# In[143]:
+
+
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+df = pd.read_csv( 'covid_confirmed_usafacts.csv' )
+print(df)
+
+
+# Data from the dataset is organized by county but we want it to be organized by state. To do this, we group the data by the "state" column and sum the contents of the rows being grouped. The newly organized dataset is now indexed by state.
+
+# In[144]:
+
+
+by_state_df = df.groupby( 'State' ).sum()
+print(by_state_df)
+
+
+# The countyFIPS and stateFIPS columns are not needed in the merged dataset so they are removed through list slicing.
+
+# In[145]:
+
+
+by_state_df = by_state_df.iloc[:,2:]
+print(by_state_df)
+
+
+# Now that the data is organized the way we want it, we want to create a function that makes it easy to get all covid cases and their dates recorded by passing in a state abbreviation.
+
+# In[146]:
+
+
+def cases_over_time_in_state ( state_abbreviation ):
+    return by_state_df.loc[state_abbreviation,:]
+
+cases_over_time_in_state( 'SD' )
+
+
+# Here we will get a list of unique states from the index of the dataframe. This will be used later as a comparison tool
+
+# In[147]:
+
+
+unique_states = by_state_df.index.tolist()
+print(unique_states)
+
+
+# Read in npr data set from npr_data.csv
+
+# In[148]:
+
+
+df_npr = pd.read_csv("npr_data.csv")
+print(df_npr)
+
+
+# As there are only 51 states including Washington DC, we should expect to see 51 rows but here we have 56. We will now the isin to check if values in the "State" column of df_npr are also present in the unique_states list. Doing this will get rid of congressional voting districts within the dataframe and ensure that only voting data for states is present. The index of the new dataframe will also be set to state to match the organization of previous dataset.
+
+# In[149]:
+
+
+df_npr_fixed = df_npr[df_npr.State.isin(unique_states)]
+df_npr_fixed = df_npr_fixed.reset_index(drop = True)
+npr_state = df_npr_fixed.set_index('State')
+print(npr_state)
+
+
+# The new dataframe now does not have data for congressional districts like ME-1 and NE-1.
+# 
+# We will now load in the county population data from covid_county_population_usafacts.csv and repeat the same process in the beginning of grouping by state and getting rid of countryFIPS.
+
+# In[150]:
+
+
+by_state_pop_df = pd.read_csv("covid_county_population_usafacts.csv")
+
+by_state_pop_df = by_state_pop_df.groupby('State').sum()
+del by_state_pop_df['countyFIPS']
+print(by_state_pop_df)
+
+
+# Now that we have all three datasets loaded in, we can begin the process of merging them together and doing additional cleaning. To make sure that the cases_over_time_in_state continues to function properly, we will make a copy of the by_state_df dataframe and add the population column from by_state_pop_df to it.
+
+# In[151]:
+
+
+by_state_df_copy=by_state_df.copy()
+
+by_state_df_copy['population'] = by_state_pop_df['population']
+print(by_state_df_copy)
+
+
+# Here we will create a dataframe that contains the data from the most recent day in the confirmed cases dataset. This is for easy reference in the future.
+
+# In[152]:
+
+
+df_most_recent = by_state_df[by_state_df.columns[-1]]
+
+
+# We will now create the final merged dataset containing data from all three downloaded datasets. 
+# 
+# The "Percentage_reported" column is deleted since it is not used. Some of the column names are renamed to better readability. The most recent day dataframe is added back to the merged dataframe as a new column called "Most_recent". The "Most_recent_per_capita" column is also created by dividing the new column by the population column.
+
+# In[153]:
+
+
+df_merged = by_state_df_copy.merge(npr_state, how='outer', left_index=True, right_index=True)
+del df_merged['Percentage_reported']
+df_merged.rename(columns={'Percentage_for_hillary':'%Hillary','Percentage_for_Trump':'%Trump','population':'Population'}, inplace=True)
+df_merged['Most_recent']= df_most_recent
+df_merged['Most_recent_per_capita'] = df_merged['Most_recent'].div(df_merged['Population'])
+
+print(df_merged)
+
+
+# Now that all the data from the datasets are in the merged dataset, we can begin the process of using the curve_fit function to generate the projected maximum, rate of increase and time of maximum increase for each state. Here we will create a function that contains the logistic curve formula.
+
+# In[154]:
+
+
+def logistic_curve(x, b0, b1, b2):
+    return(b0/(1+np.exp(b1*(-x+b2))))
+
+
+# Three empty lists are created that will eventually house the found betas generated by the curve_fit function using the logistic curve, the data for each state and the guessed betas. b0 refers to maximum cases that will arise long term, b1 refers to rate of spread and b2 refers to time of maximum spread. For each state, b0 will be the maximum number of cases seen so far, b1 will be 1 and b2 will be the halfway point of the dataset. The data for each row is plotted and a line is fitted to the curve using the logistic function. 
+# 
+# Note that maxfev is set to 10000. At the default maxfev of 800, the function throws a unboundlocalerror due to the function requiring more than 800 steps to fit the curve to the points in the graph. From the graphs below, 'ND','SD','WY' and 'MT' end up with found betas vastly different from the guessed betas. In the case of 'SD' the time of maximum increase is 1036 which is outside the range of days the dataframe contains. These abnormalities are due to the fact that those four states are better suited to being curve fitted by a exponential function rather than a logistic function. Setting maxfev to 10000 results in the lines being fitted to look more exponential rather than logistic. 
+
+# In[155]:
+
+
+from scipy.optimize import curve_fit
+
+b0_list=[]
+b1_list=[]
+b2_list=[]
+
+def curve(state):
+
+    xs = np.arange(len(cases_over_time_in_state(state)))
+    ys = cases_over_time_in_state(state)
+
+    my_guessed_betas = [ys.max(),1,len(xs)/2]
+    print(state)
+    print(my_guessed_betas)
+
+    try:
+        found_betas, covariance = curve_fit(logistic_curve, xs, ys, p0 = my_guessed_betas, maxfev=10000)
+    except:
+        print("An exception occurred")
+
+    b0,b1,b2 = found_betas
+    
+    b0_list.append(b0)
+    b1_list.append(b1)
+    b2_list.append(b2)
+    print(b0,b1,b2)
+    
+    fit_model = lambda x:logistic_curve(x,b0,b1,b2)
+    plt.scatter(xs,ys)
+    plt.plot(xs,fit_model(xs),'r-')
+    plt.show()
+
+for state in df_merged.index:
+    curve(state)
+
+
+# The found betas from 'ND','SD','WY' and 'MT' will introduce outliers into the data but that will be dealt with later. 
+# 
+# Here the found betas are added to df_merged as new columns and renamed to better reflect their intended purpose. The "projected_maximum_per_capita" column is also created by dividing "Projected_maximum" by the population column.
+
+# In[156]:
+
+
+df_merged['b0'] = b0_list
+df_merged['b1'] = b1_list
+df_merged['b2'] = b2_list
+
+df_merged.rename(columns={'b0':'Projected_maximum','b1':'Rate_of_increase','b2':'Time_of_max_increase'}, inplace=True)
+
+df_merged['Projected_maximum_per_capita'] = df_merged['Projected_maximum'].div(df_merged['Population'])
+
+
+print(df_merged)
+df_merged.to_excel('df_merged_final.xlsx')
+
+
+# As you can see from the above print out, data points like a projected maximum of over 5 billion covid cases for ND make no sense as ND obviously does not have 5 billion people living in the state. Since the data from those 4 states highlighted earlier are extreme outliers, we will have to throw them out to make sure they do not skew the results of the correlation coefficent heatmap.
+# 
+# To begin, we will import seaborn so that we have access to its heatmap function. We will drop the 4 states and then create a new dataframe that contains only the data we are concerned about, namely the percentage that voted for Hillary, the percentage that voted for Trump, the most recent number of cases, the most recent number of cases per capita, the projected maximum cases, the projected maximum cases per capita, the rate of increase and the time of maximum increase for each state.
+# 
+# We will create a correlation dataframe using the .corr() on the new dataframe and create the correlation coefficent heatmap using it. 
+
+# In[157]:
+
+
+import seaborn as sns
+df_merged_test = df_merged.drop(index = ['ND','SD','WY','MT'])
+
+df_merged_vars = df_merged_test[['%Hillary','%Trump','Most_recent','Most_recent_per_capita','Projected_maximum','Projected_maximum_per_capita', 'Rate_of_increase','Time_of_max_increase']].copy()
+
+df_corr = df_merged_vars.corr()
+
+fig, ax = plt.subplots(figsize=(10,10)) 
+ax = sns.heatmap(df_corr, annot = True, cmap="YlGnBu", linewidths=3, linecolor='white',square=True,ax=ax)
+
+
+# Looking at the first 2 rows, we can get answers for part 5 of the assignment. We will assume states that voted over 50% for Hillary are Democratic and states that voted over 50% for Trump are Republican.
+# 
+# a. Most recent number of cases: %Hillary(0.1), %Trump(-0.021)
+# 
+# b. Most recent number of cases per capita: %Hillary(-0.31), %Trump(0.36)
+# 
+# c. Projected maximum number of cases: %Hillary(0.026), %Trump(0.011)
+# 
+# d. Projected maximum number of cases per capita: %Hillary(-0.055), %Trump(0.067)
+# 
+# e. Rate of increase: %Hillary(.33), %Trump(-.028)
+# 
+# f. Time of max increase: %Hillary(-0.5), %Trump(0.46)
+# 
+# If we were to interpret 0 as no correlation, +/- .3 as a weak correlation, +/- .5 as a moderate correlation, +/- .7 as a strong correlation and 1 as a perfect correlation, the strongest correlation listed above is that between %Hillary and time of maximum increase with a correlation coefficent of -0.5.
+
+# From the correlations in the correlation heatmap, the only correlation that is strong enough and interesting enough to warrant a hypothesis test is that between projected maximum per capita and time of maximum increase. We will use a confidence level of 95%.
+# 
+# Let our null hypothesis(h0) be that correlation coefficent is not significantly different from 0. This would mean that there is not a significant correlation between projected maximum per capita and time of maximum increase.
+
+# In[158]:
+
+
+from scipy import stats
+
+alpha = 0.05
+
+statistic, pvalue = stats.ttest_ind(df_merged_vars['Projected_maximum_per_capita'],df_merged_vars['Time_of_max_increase'], equal_var=False)
+
+print(statistic, pvalue)
+pvalue < alpha
+
+
+# Because the pvalue is less than the chosen cutoff, we can reject the null hypothesis and conclude that there is sufficent evidence that there is a significant linear relationship between projected maximum per capita and time of maximum increase. 
+# 
+# Since the relationship between projected maximum per capita and time of maximum increase is significant and they have a strong correlation of .7, projected maximum per capita is a accurate predictor of time of maximum increase and vice versa. 
+
+# In[159]:
+
+
+hillary = []
+trump = []
+
+hTime = []
+tTime = []
+
+def getPol(state):
+    
+    if df_merged_test["%Hillary"].loc[state] > df_merged_test["%Trump"].loc[state]:
+        hillary.append(df_merged_test["Most_recent_per_capita"].loc[state])
+        hTime.append(df_merged_test["Time_of_max_increase"].loc[state])
+        return 0
+    else:
+        trump.append(df_merged_test["Most_recent_per_capita"].loc[state])
+        tTime.append(df_merged_test["Time_of_max_increase"].loc[state])
+        return 0
+
+for state in df_merged_test.index:
+    getPol(state)
+    
+    
+print("Hillary_capita: " + str(sum(hillary)/len(hillary)))
+print("Trump_capita: " + str(sum(trump)/len(trump)))
+
+print("Hillary_increase: " + str(sum(hTime)/len(hTime)))
+print("Trump_increase: " + str(sum(tTime)/len(tTime)))
+
+
+# In[ ]:
+
+
+
+
